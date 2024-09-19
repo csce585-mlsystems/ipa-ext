@@ -3,6 +3,9 @@
 - Start profiling experiments with etrace2 [1]
 - Setup experiment end-to-end experiments to determine power consumption
 
+# Introduction
+Accounting for fast, accurate, and cost-effective inference is challenging in multi-model inference pipelines. Furthermore, pipeline adaptation systems account for the trade-off between accuracy, latency, and cost but lack in representing energy trade-offs. We want to include energy information to modify the Inference Pipeline Adapter (IPA) to consider energy tradeoffs in addition to accuracy, latency, and cost. 
+
 # Problem Statement
 - The InfAdapter system lacks reporting on energy consumption across different experiments
 - Lacks energy efficiency benchmarks comparing against other inference-serving systems
