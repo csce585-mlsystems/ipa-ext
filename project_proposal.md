@@ -3,14 +3,14 @@
 - Start profiling experiments with etrace2 [1]
 - Setup experiment end-to-end experiments to determine power consumption
 
+# Project Repository
+https://github.com/csce585-mlsystems/ipa-ext
+
 # Introduction
 Accounting for fast, accurate, and cost-effective inference is challenging in multi-model inference pipelines. Furthermore, pipeline adaptation systems account for the trade-off between accuracy, latency, and cost but lack in representing energy trade-offs. We want to include energy information to modify the Inference Pipeline Adapter (IPA) to consider energy tradeoffs in addition to accuracy, latency, and cost. 
 
 # Problem Statement
-- The InfAdapter system lacks reporting on energy consumption across different experiments
-- Lacks energy efficiency benchmarks comparing against other inference-serving systems
-- This limits the evaluation of InfAdapter’s overall effectiveness and sustainability in real-world deployments
-- Addressing this gap is crucial for meeting industry standard sustainable AI/ML deployment
+Modern applications like autonomous vehicles, healthcare diagnostics, and recommendation systems rely on complex machine learning (ML) inference pipelines that require high accuracy under strict latency constraints. Running these models at scale leads to significant energy consumption, resulting in higher operational costs and contributing to environmental impacts due to increased carbon emissions. The current Inference Pipeline Adapter (IPA) system does not report energy consumption across different experiments/workloads. IPA also lacks energy efficiency benchmarks compared against other inference-serving/pipeline systems. This lack of energy awareness makes it challenging to optimize for energy efficiency to meet industry standards for sustainable AI/ML deployment. By addressing this gap, IPA can be a viable solution for real-world applications that demand performance, cost-effectiveness, and sustainability.
 
 <img src="images/feat_comparison.png" alt="alt text" width="600" />
 *Feature comparison table [6]*
@@ -36,6 +36,9 @@ Accounting for fast, accurate, and cost-effective inference is challenging in mu
 - We aim to benchmark the energy consumption of IPA with different configurations, using tools such as Zeus for GPU [5] and etrace2 for CPU
 - Moreover, we plan to have a discussion on how this metric can be optimized
 
+# Related Work
+Our project extends prior work on optimizing machine learning (ML) inference serving systems by incorporating energy consumption into the optimization objectives. Previous systems like InferLine [8] and Loki [9] focused on latency-aware provisioning and scaling for prediction serving pipelines, optimizing for latency and cost but not considering energy efficiency. AutoInfer [10] and Swayam [11] introduced self-driving management and distributed autoscaling to ensure response-time Service Level Agreements (SLAs) while maximizing resource efficiency, yet they did not explicitly address energy consumption or environmental impact. Studies like Harty et al. [12] investigated energy consumption in ML training and inference, emphasizing energy-efficient practices, while Clover [3] presented a carbon-friendly ML inference service runtime that balances performance, accuracy, and carbon emissions. Our work builds upon these efforts by extending the Inference Pipeline Adapter (IPA) [2] to consider energy trade-offs alongside accuracy, latency, and cost, operationalizing energy-efficient practices within a system-level optimization framework.
+
 # References
 [[1] etrace2](https://chameleoncloud.readthedocs.io/en/latest/technical/metrics.html#energy-and-power-consumption-measurement-with-etrace2)
 
@@ -51,6 +54,12 @@ Accounting for fast, accurate, and cost-effective inference is challenging in mu
 
 [[7] Time-Slicing GPUs in Kubernetes](https://docs.nvidia.com/datacenter/cloud-native/gpu-operator/latest/gpu-sharing.html)
 
+[[8] Crankshaw, D., Wang, G., Zhou, X., Franklin, M. J., Gonzalez, J. E., & Stoica, I. (2020). InferLine: Latency-aware provisioning and scaling for prediction serving pipelines. _Proceedings of the ACM Symposium on Cloud Computing (SoCC)_, 477–491.](https://dl.acm.org/doi/pdf/10.1145/3419111.3421285)
 
+[[9] Du, Z., Guo, W., Wang, X., Gao, B., Wang, Z., & Zhang, Y. (2023). Loki: A system for serving ML inference pipelines with hardware and accuracy scaling. _Proceedings of the 27th ACM SIGPLAN Symposium on Principles and Practice of Parallel Programming (PPoPP)_, 427–439.](https://dl.acm.org/doi/pdf/10.1145/3625549.3658688)
 
+[[10] He, C., Sun, L., Li, J., & Li, K. (2021). AutoInfer: Self-driving management for resource-efficient, SLO-aware machine-learning inference in GPU clusters. _IEEE Transactions on Parallel and Distributed Systems_, 32(1), 92–105.](https://ieeexplore.ieee.org/abstract/document/9956001?casa_token=Iud9yB73WhMAAAAA:Fwq1iPAIMWu3AjYIjurHwEzpizrCV8BidkETMun4bbvKQxXig_xzlA1LiuoEVkjQ9xWbp3TUatk)
 
+[[11] Harlap, A., Narayanan, D., Phanishayee, A., Seshadri, V., & Ganger, G. R. (2017). Swayam: Distributed autoscaling to meet SLAs of machine learning inference services with resource efficiency. _Proceedings of the 2017 ACM Symposium on Cloud Computing (SoCC)_, 185–197.](https://dl.acm.org/doi/pdf/10.1145/3135974.3135993)
+
+[[12] Harty, A., Shah, N., Fleming, T., Asuni, N., & Jiang, N. (2023). Computing within limits: An empirical study of energy consumption in ML training and inference. _arXiv preprint arXiv:2303.12101_.](https://arxiv.org/pdf/2406.14328)
