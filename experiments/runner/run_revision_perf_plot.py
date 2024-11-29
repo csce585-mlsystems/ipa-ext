@@ -10,7 +10,8 @@ experiments_per_group = 4  # Number of experiments per group
 workload_labels = ['IPA', 'FA2-low', 'FA2-high', 'RIM']
 
 # Get list of log files
-log_files = glob.glob('logs/energy-video-mul-*.log')
+log_files = glob.glob(os.path.join(
+    os.getenv('HOME'), 'ipa-ext/energy_logs/energy-video-mul-*.log'))
 
 # Sort the log files numerically based on the experiment number in the filename
 log_files.sort(key=lambda x: int(os.path.splitext(
