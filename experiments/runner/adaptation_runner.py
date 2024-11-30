@@ -2,12 +2,13 @@
 Iterate through all possible combination
 of pipelines
 """
-import os
 import json
-import yaml
-import click
-import sys
+import os
 import shutil
+import sys
+
+import click
+import yaml
 
 # get an absolute path to the directory that contains parent files
 project_dir = os.path.dirname(__file__)
@@ -17,15 +18,10 @@ from experiments.utils.prometheus import PromClient
 
 prom_client = PromClient()
 
-from experiments.utils.constants import (
-    FINAL_CONFIGS_PATH,
-    FINAL_RESULTS_PATH,
-    ACCURACIES_PATH,
-)
-
-from optimizer import Adapter
+from experiments.utils.constants import ACCURACIES_PATH, FINAL_CONFIGS_PATH, FINAL_RESULTS_PATH
 from experiments.utils.simulation_operations import generate_simulated_pipeline
 from experiments.utils.workload import make_workload
+from optimizer import Adapter
 
 
 @click.command()
@@ -50,9 +46,8 @@ def main(config_name: str, type_of: str):
     series = config["series"]
 
     # name resuls zero for consistency with the profiling parser
-    dir_path = os.path.join(
-        FINAL_RESULTS_PATH, "metaseries", str(metaseries), "series", str(series)
-    )
+    dir_path = os.path.join(FINAL_RESULTS_PATH, "metaseries", str(metaseries), "series",
+                            str(series))
     save_path = os.path.join(dir_path, "adaptation_log.json")
     pipeline_name = config["pipeline_name"]
     node_names = [config["node_name"] for config in config["nodes"]]
