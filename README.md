@@ -3,7 +3,14 @@
 A CSCE 585 - Machine Learning Systems Project
 
 ## Installation
-Follow the instructions in the original ipa repository (https://github.com/reconfigurable-ml-pipeline/ipa/blob/main/infrastructure/automated.md) 
+1. Follow the instructions in the original ipa repository (https://github.com/reconfigurable-ml-pipeline/ipa/blob/main/infrastructure/automated.md) 
+
+2. For measuring energy consumption, install `perf` tool using the following commands:
+```
+sudo apt update
+sudo apt install linux-tools-common linux-tools-generic linux-tools-$(uname -r)
+perf --version
+```
 
 ## Usage
 
