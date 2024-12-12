@@ -10,8 +10,7 @@ experiments_per_group = 4  # Number of experiments per group
 workload_labels = ['IPA', 'FA2-low', 'FA2-high', 'RIM']
 
 # Get list of log files
-log_files = glob.glob(os.path.join(
-    os.getenv('HOME'), 'ipa-ext/energy_logs/energy-video-mul-*.log'))
+log_files = glob.glob('../../energy_logs/energy-video-mul-*.txt')
 
 # Sort the log files numerically based on the experiment number in the filename
 log_files.sort(key=lambda x: int(os.path.splitext(
@@ -89,6 +88,8 @@ for idx, log_file in enumerate(log_files):
     groups[group_index][experiment_index]['label'] = label
 
 # Plotting the data for each group
+output_dir = 'plots'
+os.makedirs(output_dir, exist_ok=True)
 for i, group in enumerate(groups):
     plt.figure(figsize=(10, 6))
     # Plot each experiment within the group
@@ -121,6 +122,6 @@ for i, group in enumerate(groups):
     plt.xlim(0, 20)  # Each experiment lasts 20 minutes
     plt.legend(loc='lower right', fontsize=14)
     plt.grid(True, linestyle='--', alpha=0.6)
-    plt.savefig(f'plots/energy_plot_group_{i+1}.png',
+    plt.savefig(f'{output_dir}/energy_plot_group_{i+1}.png',
                 dpi=300, bbox_inches='tight', pad_inches=0.1)
     plt.close()
