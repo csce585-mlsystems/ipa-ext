@@ -25,5 +25,23 @@ perf --version
    - Use the `experiments/runner/run_revision_perf_plot.ipynb` Jupyter Notebook to generate plots for the energy benchmarks of the workloads.
    - The generated plots are saved in the `plots` directory.
 
-## Final Report
-Please find the Milestone 3 report [here](IPA_Ext_milestone3.pdf).
+
+4. **Segment Anything:**
+   - Set up a conda environment with SAM `conda create -n sam python=3.8`
+   - `pip install git+https://github.com/facebookresearch/segment-anything.git`
+   - `cd segment-anything; pip install -e .`
+   - Download sam weights from:
+      -`vit_b`: [ViT-B SAM model.](https://dl.fbaipublicfiles.com/segment_anything/sam_vit_b_01ec64.pth)
+      -`vit_h`: [ViT-H SAM model.](https://dl.fbaipublicfiles.com/segment_anything/sam_vit_h_4b8939.pth)**
+      -`vit_l`: [ViT-L SAM model.](https://dl.fbaipublicfiles.com/segment_anything/sam_vit_l_0b3195.pth)
+   
+   - To generate energy consumption results use `segment-anything/sam_energy.sh`
+   - The energy logs will be in `segment-anything/sam_energy_log`
+   - The segmentation masks will be saved in `segment-anything/segmentation_benchmark/{model_type}_results`
+   - To graph the energy consumption results you can run the `segment_anything/graph_sam_energy_consumption.ipynb`
+   
+   - To calculate IoU run `segment-anything/metrics.sh`
+
+## Final Deliverables
+Please find the Final report [here](FinalReport.pdf).
+Please find the Final presentation slides [here](FinalPresentation.pdf).
