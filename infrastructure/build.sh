@@ -1,11 +1,12 @@
 #!/bin/bash
 
 install_packages() {
-    if [ -z "$1" ];
-    then
-        echo "You must provide public IP: ./build.sh PUBLIC_IP"
-        exit 0; 
-    fi
+    # if [ -z "$1" ];
+    # then
+    #     echo "You must provide public IP: ./build.sh PUBLIC_IP"
+    #     exit 0; 
+    # fi
+    export PUBLIC_IP=$(dig +short myip.opendns.com @resolver1.opendns.com)
 
     hack_dir="$HOME/ipa/infrastructure/hack"
     disable_firewall="${hack_dir}/disable_firewall.sh"

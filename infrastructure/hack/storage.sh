@@ -1,22 +1,37 @@
 #!/bin/bash
 
-PRIVATEIP=$(hostname -I | cut -d' ' -f1)
+# Function to retrieve the public IP address
+get_public_ip() {
+    # Using dig to get the public IP address
+    dig +short myip.opendns.com @resolver1.opendns.com
+}
 
+# Function to retrieve the private IP address
+get_private_ip() {
+    # Grabbing the first non-loopback IP address
+    hostname -I | awk '{print $1}'
+}
 
-function setup_storage() {
-    PUBLIC_IP="$1"
+# Function to set up storage
+setup_storage() {
+    local PUBLIC_IP="$1"
+    local PRIVATE_IP="$2"
 
-    echo "Setup storage: Install NFS"
-    sudo apt install -y nfs-kernel-server
-    sudo mkdir /mnt/myshareddir
+    echo "Setting up storage: Installing NFS..."
+    sudo apt-get update
+    sudo apt-get install -y nfs-kernel-server
+
+    echo "Creating shared directory..."
+    sudo mkdir -p /mnt/myshareddir
     sudo chown nobody:nogroup /mnt/myshareddir
     sudo chmod 777 /mnt/myshareddir
-    echo "/mnt/myshareddir $PRIVATEIP/30(rw,sync,no_subtree_check)" | sudo tee -a /etc/exports
+
+    echo "Configuring NFS exports..."
+    echo "/mnt/myshareddir ${PRIVATE_IP}/24(rw,sync,no_subtree_check)" | sudo tee -a /etc/exports
     sudo exportfs -a
     sudo systemctl restart nfs-kernel-server
-    echo "Setup storage: End Install NFS"
-    echo
 
+    echo "Applying PersistentVolume configuration..."
     cat <<EOF | kubectl apply -f -
 apiVersion: v1
 kind: PersistentVolume
@@ -32,11 +47,14 @@ spec:
   accessModes:
     - ReadWriteMany
   nfs:
-    server: $PRIVATEIP
+    server: ${PRIVATE_IP}
     path: "/mnt/myshareddir"
 EOF
 
-    kubectl create ns minio-system
+    echo "Creating namespace for MinIO..."
+    kubectl create namespace minio-system || true
+
+    echo "Applying PersistentVolumeClaim configuration..."
     cat <<EOF | kubectl apply -f -
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -52,11 +70,14 @@ spec:
       storage: 100Gi
 EOF
 
-    MINIOUSER=minioadmin
-    MINIOPASSWORD=minioadmin
+    local MINIOUSER="minioadmin"
+    local MINIOPASSWORD="minioadmin"
 
+    echo "Adding MinIO Helm repository..."
     helm repo add minio https://charts.min.io/
+    helm repo update
 
+    echo "Deploying MinIO using Helm..."
     helm upgrade --install minio minio/minio \
       --namespace minio-system \
       --set rootUser=${MINIOUSER} \
@@ -66,40 +87,63 @@ EOF
       --set persistence.existingClaim=pvc-nfs \
       --set persistence.storageClass=- \
       --set replicas=1
-    
+
+    echo "Patching MinIO service to use LoadBalancer..."
     kubectl patch svc minio -n minio-system --type='json' -p '[{"op":"replace","path":"/spec/type","value":"LoadBalancer"}]'
     kubectl patch svc minio -n minio-system --patch '{"spec": {"type": "LoadBalancer", "ports": [{"port": 9000, "nodePort": 31900}]}}'
 
+    echo "Retrieving MinIO access credentials..."
+    local ACCESS_KEY
+    local SECRET_KEY
     ACCESS_KEY=$(kubectl get secret minio -n minio-system -o jsonpath="{.data.rootUser}" | base64 --decode)
     SECRET_KEY=$(kubectl get secret minio -n minio-system -o jsonpath="{.data.rootPassword}" | base64 --decode)
-    
+
+    echo "Downloading and configuring MinIO client..."
     wget https://dl.min.io/client/mc/release/linux-amd64/mc
     chmod +x mc
-    sudo cp mc /usr/local/bin
-    mc alias set minio http://localhost:31900 "$ACCESS_KEY" "$SECRET_KEY" --api s3v4
-    sudo mc ls minio
+    sudo mv mc /usr/local/bin/
 
+    echo "Setting up MinIO client alias..."
+    mc alias set minio http://localhost:31900 "${ACCESS_KEY}" "${SECRET_KEY}" --api s3v4
+    mc ls minio
+
+    echo "Creating RClone secret for Seldon..."
     cat <<EOF | kubectl apply -f -
 apiVersion: v1
 kind: Secret
 metadata:
   name: seldon-rclone-secret
+  namespace: default
 type: Opaque
 stringData:
   RCLONE_CONFIG_S3_TYPE: s3
   RCLONE_CONFIG_S3_PROVIDER: Minio
   RCLONE_CONFIG_S3_ENV_AUTH: "false"
-  RCLONE_CONFIG_S3_ACCESS_KEY_ID: minioadmin
-  RCLONE_CONFIG_S3_SECRET_ACCESS_KEY: minioadmin
-  RCLONE_CONFIG_S3_ENDPOINT: http://$PUBLIC_IP:31900
+  RCLONE_CONFIG_S3_ACCESS_KEY_ID: ${MINIOUSER}
+  RCLONE_CONFIG_S3_SECRET_ACCESS_KEY: ${MINIOPASSWORD}
+  RCLONE_CONFIG_S3_ENDPOINT: http://${PUBLIC_IP}:31900
 EOF
-    rm mc
-    echo "End Setup storage"
-    echo
+
+    echo "Cleaning up..."
+    rm -f mc
+
+    echo "Storage setup completed successfully."
 }
 
+# Main script execution
+echo "Running script..."
 
-echo "Running script"
-setup_storage
+# Retrieve public and private IP addresses
+PUBLIC_IP=$(get_public_ip)
+PRIVATE_IP=$(get_private_ip)
 
-echo "Script execution complete"
+# Ensure both IP addresses were retrieved successfully
+if [[ -z "${PUBLIC_IP}" || -z "${PRIVATE_IP}" ]]; then
+    echo "Error: Unable to retrieve IP addresses."
+    exit 1
+fi
+
+# Call the setup_storage function with the retrieved IP addresses
+setup_storage "${PUBLIC_IP}" "${PRIVATE_IP}"
+
+echo "Script execution complete."

@@ -1,5 +1,7 @@
 #!/bin/bash
 
+set -euo pipefail
+
 install_kubectl() {
     echo "Install kubectl"
     curl -LO https://dl.k8s.io/release/v1.23.2/bin/linux/amd64/kubectl
@@ -8,22 +10,22 @@ install_kubectl() {
     # sudo ufw allow 16443
     # echo "y" | sudo ufw enable
     echo "End Install kubectl"
-    rm kubectl
+    rm -rf kubectl
 }
 
-function install_istio() {
-    echo "Install Istio"
+install_istio() {
+    echo "Installing Istio..."
     sudo microk8s enable community
     sudo microk8s enable istio
     kubectl apply -f https://raw.githubusercontent.com/istio/istio/release-1.13/samples/addons/prometheus.yaml
     kubectl apply -f https://raw.githubusercontent.com/istio/istio/release-1.13/samples/addons/kiali.yaml
-    echo "End Install Istio"
+    echo "Istio installed successfully."
     echo
 }
 
-function install_seldon_core() {
-    echo "Install Seldon Core"
-    kubectl create namespace seldon-system
+install_seldon_core() {
+    echo "Installing Seldon Core..."
+    kubectl create namespace seldon-system || true
     helm install seldon-core seldon-core-operator \
         --repo https://storage.googleapis.com/seldon-charts \
         --set usageMetrics.enabled=true \
@@ -49,12 +51,11 @@ spec:
 EOF
 
     kubectl patch svc istio-ingressgateway -n istio-system --patch '{"spec": {"ports": [{"name": "http2", "nodePort": 32000, "port": 80, "protocol": "TCP", "targetPort": 8080}]}}'
-    echo "End Install Seldon Core"
-    echo
+    echo "Seldon Core installed successfully."
 }
 
-function configure_monitoring() {
-    echo "Configure monitoring"
+configure_monitoring() {
+    echo "Configuring monitoring..."
     sudo microk8s enable prometheus
 
     cat <<EOF | kubectl apply -f -
@@ -82,22 +83,20 @@ EOF
     kubectl patch svc grafana -n monitoring --patch '{"spec": {"type": "NodePort", "ports": [{"port": 3000, "nodePort": 30300}]}}'
     kubectl apply -f https://raw.githubusercontent.com/istio/istio/release-1.13/samples/addons/kiali.yaml
     kubectl apply -f https://raw.githubusercontent.com/istio/istio/release-1.13/samples/addons/jaeger.yaml
-    echo "End Configure monitoring"
-    echo
+    echo "Monitoring configuration complete."
 }
 
-function install_docker() {
-    echo "Install Docker"
-    sudo apt-get remove -y docker docker-engine docker.io containerd runc
+install_docker() {
+    echo "Installing Docker..."
+    sudo apt-get remove -y docker docker-engine docker.io containerd runc || true
     curl -fsSL https://get.docker.com -o get-docker.sh
     sudo sh get-docker.sh
-    sudo groupadd docker
-    sudo usermod -aG docker $USER
+    sudo groupadd docker || true
+    sudo usermod -aG docker "$USER"
     sudo systemctl enable docker.service
     sudo systemctl enable containerd.service
     rm get-docker.sh
-    echo "End Install Docker"
-    echo
+    echo "Docker installed successfully. Please log out and log back in to use Docker as a non-root user."
 }
 
 install_kubectl

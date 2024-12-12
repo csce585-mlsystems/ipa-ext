@@ -2,30 +2,34 @@
 
 # Update and install necessary packages
 function install_packages() {
-    echo "Updating packages"
+    echo "Updating packages..."
     sudo apt-get update -y
-    echo "Installing packages"
-    sudo apt-get install unzip ffmpeg libsm6 libxext6 -y
-    echo "Packages installation complete"
+    echo "Installing required packages..."
+    sudo apt-get install -y unzip ffmpeg libsm6 libxext6
+    echo "Packages installation complete."
     echo
 }
 
 # Install and activate Conda environment
 function install_conda_environment() {
-    echo "Removing Conda environment"
-    conda deactivate
-    conda env remove --name central
+    echo "Checking for existing Conda environment..."
+    if conda env list | grep -q "^central\s"; then
+        echo "Removing existing Conda environment..."
+        conda deactivate || true
+        conda env remove --name central
+    fi
 
-    echo "Installing and activating Conda environment"
-    wget https://repo.anaconda.com/miniconda/Miniconda3-py39_23.3.1-0-Linux-x86_64.sh -O miniconda-39.sh
-    bash miniconda-39.sh -fb
+    echo "Installing Miniconda..."
+    wget -q https://repo.anaconda.com/miniconda/Miniconda3-py39_23.3.1-0-Linux-x86_64.sh -O miniconda-39.sh
+    bash miniconda-39.sh -b -p $HOME/miniconda3
     rm miniconda-39.sh
 
-    source ~/miniconda3/etc/profile.d/conda.sh
-    conda init --all
-    conda create --name central -y python=3.9.15
+    echo "Initializing Conda..."
+    source $HOME/miniconda3/etc/profile.d/conda.sh
+    conda init
+    conda env create --file ~/ipa/environment.yml
     conda activate central
-    echo "Conda environment installation complete"
+    echo "Conda environment setup complete."
     echo
 }
 
@@ -52,17 +56,23 @@ function install_inference_pipeline() {
 
 # Install load_tester
 function install_load_tester() {
-    echo "Installing load tester"
-    cd ~/ipa/load_tester
-    pip install -e .
-    cd ..
-    echo "load_tester installation complete"
+    echo "Installing load tester..."
+    local load_tester_dir="$HOME/ipa/load_tester"
+
+    if [ -d "$load_tester_dir" ]; then
+        cd "$load_tester_dir"
+        pip install -e .
+        cd
+        echo "Load tester installation complete."
+    else
+        echo "Directory $load_tester_dir does not exist. Skipping load tester installation."
+    fi
     echo
 }
 
 # Call the functions
 install_packages
 install_conda_environment
-install_custom_mlserver
+# install_custom_mlserver
 install_inference_pipeline
 install_load_tester
