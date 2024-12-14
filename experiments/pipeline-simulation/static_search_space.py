@@ -1,27 +1,22 @@
-import pandas as pd
-import click
-import time
 import os
-import sys
 import shutil
-import yaml
+import sys
+import time
 from pprint import PrettyPrinter
+
+import click
+import pandas as pd
+import yaml
 
 pp = PrettyPrinter(indent=4)
 
 project_dir = os.path.dirname(__file__)
 sys.path.append(os.path.normpath(os.path.join(project_dir, "..", "..")))
 
-from optimizer import Optimizer
-from experiments.utils.simulation_operations import generate_simulated_pipeline
-
-from experiments.utils.constants import (
-    PIPELINE_SIMULATION_CONFIGS_PATH,
-    PIPELINE_SIMULATION_RESULTS_PATH,
-    ACCURACIES_PATH,
-)
-
 from experiments.utils import logger
+from experiments.utils.constants import ACCURACIES_PATH, PIPELINE_SIMULATION_CONFIGS_PATH, PIPELINE_SIMULATION_RESULTS_PATH
+from experiments.utils.simulation_operations import generate_simulated_pipeline
+from optimizer import Optimizer
 
 config_key_mapper = "key_config_mapper.csv"
 
@@ -191,6 +186,28 @@ def main(config_name: str):
             optimal_time = time.time() - optimal_time
             time_file.write(f"optimal_time_gurobi: {optimal_time}\n")
             logger.info(f"optimal time gurobi: {optimal_time}")
+
+        elif optimization_method == "q-learning":
+            optimal_time = time.time()
+            # optimal states
+            optimal = optimizer.optimize(
+                optimization_method=optimization_method,
+                scaling_cap=scaling_cap,
+                batching_cap=batching_cap,
+                alpha=alpha,
+                beta=beta,
+                gamma=gamma,
+                arrival_rate=arrival_rate,
+                num_state_limit=num_state_limit,
+            )
+            # logger.info(f"{optimal = }")
+            optimal.to_markdown(
+                os.path.join(dir_path, "readable-optimal-q-learning.csv"), index=False
+            )
+            optimal.to_csv(os.path.join(dir_path, "optimal-q-learning.csv"), index=False)
+            optimal_time = time.time() - optimal_time
+            time_file.write(f"optimal_time_q-learning: {optimal_time}\n")
+            logger.info(f"optimal time q-learning: {optimal_time}")
 
         if optimization_method == "brute-force":
             optimal_time = time.time()
