@@ -2,13 +2,12 @@
 Iterate through all possible combination
 of pipelines
 """
-import json
 import os
-import shutil
-import sys
-
-import click
+import json
 import yaml
+import click
+import sys
+import shutil
 
 # get an absolute path to the directory that contains parent files
 project_dir = os.path.dirname(__file__)
@@ -18,17 +17,22 @@ from experiments.utils.prometheus import PromClient
 
 prom_client = PromClient()
 
-from experiments.utils import logger
-from experiments.utils.constants import FINAL_CONFIGS_PATH, FINAL_RESULTS_PATH, PIPLINES_PATH
 from experiments.utils.pipeline_operations import (
-    check_load_test,
     load_data,
+    warm_up,
+    check_load_test,
     load_test,
     remove_pipeline,
-    setup_central_pipeline,
     setup_router_pipeline,
-    warm_up,
+    setup_central_pipeline,
 )
+
+from experiments.utils.constants import (
+    PIPLINES_PATH,
+    FINAL_CONFIGS_PATH,
+    FINAL_RESULTS_PATH,
+)
+from experiments.utils import logger
 from experiments.utils.workload import make_workload
 
 
@@ -190,8 +194,9 @@ def main(config_name: str, type_of: str):
     series = config["series"]
 
     # name resuls zero for consistency with the profiling parser
-    dir_path = os.path.join(FINAL_RESULTS_PATH, "metaseries", str(metaseries), "series",
-                            str(series))
+    dir_path = os.path.join(
+        FINAL_RESULTS_PATH, "metaseries", str(metaseries), "series", str(series)
+    )
     save_path = os.path.join(dir_path, "0.json")
     pipeline_name = config["pipeline_name"]
     pipeline_folder_name = config["pipeline_folder_name"]
@@ -211,8 +216,9 @@ def main(config_name: str, type_of: str):
     # pipeline path based on pipeline type [central | distributed] queues
     central_queue = config["central_queue"]
     pipeline_type = "mlserver-centralized" if central_queue else "mlserver-final"
-    pipeline_path = os.path.join(PIPLINES_PATH, pipeline_type, pipeline_folder_name,
-                                 "seldon-core-version")
+    pipeline_path = os.path.join(
+        PIPLINES_PATH, pipeline_type, pipeline_folder_name, "seldon-core-version"
+    )
 
     if not os.path.exists(dir_path):
         os.makedirs(dir_path)
@@ -259,7 +265,9 @@ def main(config_name: str, type_of: str):
         )
 
         # 1. process one the experiment runner
-        result = experiments(config=config, pipeline_path=pipeline_path, data_type=data_type)
+        result = experiments(
+            config=config, pipeline_path=pipeline_path, data_type=data_type
+        )
 
         with open(save_path, "w") as outfile:
             outfile.write(json.dumps(result))

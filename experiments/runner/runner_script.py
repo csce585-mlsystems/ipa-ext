@@ -1,10 +1,8 @@
-import subprocess
+import argparse
 import os
+import subprocess
 import sys
 import time
-
-# Parse command line arguments
-import argparse
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--config-name", help="Path to configuration file", required=True)
