@@ -1,9 +1,8 @@
 import itertools
-import math
 import os
 import random
 from copy import deepcopy
-from typing import Dict, List, Optional, Union
+from typing import Dict, List, Optional, Tuple
 
 import gurobipy as gp
 import numpy as np
@@ -12,8 +11,18 @@ from gurobipy import GRB
 
 from .models import Pipeline
 
+# from functools import lru_cache
+
 
 class Optimizer:
+    __slots__ = (
+        "pipeline",
+        "allocation_mode",
+        "complete_profile",
+        "only_measured_profiles",
+        "random_sample",
+        "baseline_mode",
+    )
 
     def __init__(
         self,
@@ -24,15 +33,20 @@ class Optimizer:
         random_sample: bool,
         baseline_mode: Optional[str] = None,
     ) -> None:
-        """Initialize the Optimizer with pipeline and configuration parameters.
+        """
+        Initialize the Optimizer.
 
         Args:
-            pipeline (Pipeline): Pipeline object for optimization.
-            allocation_mode (str): Allocation mode for CPU usage ('fix', 'base', 'variable').
-            complete_profile (bool): Whether to log the complete result.
-            only_measured_profiles (bool): Use only measured profiles, not regression models.
-            random_sample (bool): Whether to use random sampling for state generation.
-            baseline_mode (Optional[str], optional): Baseline mode. Defaults to None.
+            pipeline (Pipeline): The pipeline object for optimization.
+            allocation_mode (str): The allocation mode for CPU/GPU usage: fix|base|variable
+                - fix: stays on the initial CPU allocation
+                - base: finding the base allocation as explained in the paper
+                - variable: search through CPU allocation as a configuration knob
+            complete_profile (bool): Whether to log the complete result or not.
+            only_measured_profiles (bool): If True, only profiles based on measured latency/throughput
+                and does not use regression models.
+            random_sample (bool): Whether to randomly sample states.
+            baseline_mode (Optional[str]): Baseline approach mode: None|scale|switch|switch-scale.
         """
         self.pipeline = pipeline
         self.allocation_mode = allocation_mode
@@ -41,358 +55,351 @@ class Optimizer:
         self.random_sample = random_sample
         self.baseline_mode = baseline_mode
 
+    # @lru_cache(maxsize=None)
     def accuracy_objective(self) -> float:
-        """Calculate the accuracy objective of the pipeline."""
+        """
+        Returns the accuracy objective of the pipeline.
+
+        Returns:
+            float: The pipeline's accuracy objective.
+        """
         return self.pipeline.pipeline_accuracy
 
+    # @lru_cache(maxsize=None)
     def resource_objective(self) -> float:
-        """Calculate the resource usage objective of the pipeline."""
+        """
+        Returns the resource objective of the pipeline.
+
+        Returns:
+            float: The pipeline's CPU usage as the resource objective.
+        """
         return self.pipeline.cpu_usage
 
+    # @lru_cache(maxsize=None)
     def batch_objective(self) -> float:
-        """Calculate the batch objective of the pipeline."""
-        return max(task.batch for task in self.pipeline.inference_graph)
+        """
+        Computes the batch objective of the pipeline as the sum of all tasks' batch sizes.
 
+        Returns:
+            float: The cumulative batch size.
+        """
+        total_batch = 0
+        for task in self.pipeline.inference_graph:
+            total_batch += task.batch
+        return total_batch
+
+    # @lru_cache(maxsize=None)
     def objective(self, alpha: float, beta: float, gamma: float) -> Dict[str, float]:
-        """Compute the weighted objectives of the pipeline."""
-        accuracy = alpha * self.accuracy_objective()
-        resource = beta * self.resource_objective()
-        batch = gamma * self.batch_objective()
+        """
+        Computes the combined objective function of the pipeline:
+        objective = alpha*accuracy - beta*resource - gamma*batch
+
+        Args:
+            alpha (float): Weight for accuracy objective.
+            beta (float): Weight for resource usage objective.
+            gamma (float): Weight for batch size objective.
+
+        Returns:
+            Dict[str, float]: Dictionary containing individual and combined objectives.
+        """
+        acc_obj = alpha * self.accuracy_objective()
+        res_obj = beta * self.resource_objective()
+        bat_obj = gamma * self.batch_objective()
         return {
-            "accuracy_objective": accuracy,
-            "resource_objective": resource,
-            "batch_objective": batch,
-            "objective": accuracy - resource - batch
+            "accuracy_objective": acc_obj,
+            "resource_objective": res_obj,
+            "batch_objective": bat_obj,
+            "objective": acc_obj - res_obj - bat_obj,
         }
 
+    # @lru_cache(maxsize=None)
     def constraints(self, arrival_rate: int) -> bool:
-        """Check if the pipeline meets the SLA and can sustain the load."""
+        """
+        Checks if pipeline constraints (SLA and load sustainment) are met.
+
+        Args:
+            arrival_rate (int): The arrival rate to test.
+
+        Returns:
+            bool: True if SLA is met and load is sustainable, False otherwise.
+        """
         return self.sla_is_met() and self.can_sustain_load(arrival_rate=arrival_rate)
 
+    # @lru_cache(maxsize=None)
     def pipeline_latency_upper_bound(self, stage: str, variant_name: str) -> float:
-        """Calculate the maximum latency for a given stage and variant."""
+        """
+        Calculates the maximum latency of a given stage and variant by setting the largest batch.
+
+        Args:
+            stage (str): The pipeline stage name.
+            variant_name (str): The variant name for that stage.
+
+        Returns:
+            float: The maximum model latency for the specified stage and variant.
+        """
         inference_graph = deepcopy(self.pipeline.inference_graph)
+        max_model = 0.0
         for task in inference_graph:
             if task.name == stage:
                 task.model_switch(variant_name)
                 task.change_batch(max(task.batches))
-                return task.model_latency
-        return 0.0
+                max_model = task.model_latency
+        return max_model
 
+    # @lru_cache(maxsize=None)
     def latency_parameters(
         self, only_measured_profiles: bool
-    ) -> Union[Dict[str, Dict[str, List[float]]], Dict[str, Dict[str, Dict[str, float]]]]:
-        """Generate latency parameters for all models and batches."""
-        model_latencies = {
-            task.name: {
-                variant: {
-                    batch: (task.change_batch(batch) or task.model_latency)
-                    for batch in task.batches
-                }
-                for variant in task.variant_names
-            }
-            for task in deepcopy(self.pipeline.inference_graph)
-        }
+    ) -> Dict[str, Dict[str, Dict[int, float]]]:
+        """
+        Computes latency parameters for all stages, variants, and batch sizes.
 
-        distinct_batches = sorted({
-            batch
-            for variants in model_latencies.values()
-            for variant in variants.values()
-            for batch in variant.keys()
-        })
+        For each task variant and batch size, retrieves the measured latency.
+        Missing batches are assigned a large dummy latency value.
 
+        Args:
+            only_measured_profiles (bool): If True, only measured profiles are used.
+
+        Returns:
+            Dict[str, Dict[str, Dict[int, float]]]: 
+                [stage_name][variant_name][batch_size] = latency
+        """
+        model_latencies_parameters: Dict[str, Dict[str, Dict[int, float]]] = {}
+        inference_graph = deepcopy(self.pipeline.inference_graph)
+        for task in inference_graph:
+            stage_dict = {}
+            for variant_name in task.variant_names:
+                variant_dict = {}
+                task.model_switch(variant_name)
+                for batch_size in task.batches:
+                    task.change_batch(batch_size)
+                    variant_dict[batch_size] = task.model_latency
+                stage_dict[variant_name] = variant_dict
+            model_latencies_parameters[task.name] = stage_dict
+
+        # Collect all distinct batch sizes
+        all_batch_sizes = set()
+        for stage_values in model_latencies_parameters.values():
+            for variant_profile in stage_values.values():
+                all_batch_sizes.update(variant_profile.keys())
+        distinct_batches = sorted(all_batch_sizes)
+
+        # Fill missing batches with dummy latency
         dummy_latency = 1000.0
-        for variants in model_latencies.values():
-            for variant in variants.values():
+        for stage, variants in model_latencies_parameters.items():
+            for variant_name, variant_profile in variants.items():
                 for batch in distinct_batches:
-                    variant.setdefault(batch, dummy_latency)
+                    if batch not in variant_profile:
+                        variant_profile[batch] = dummy_latency
 
-        return model_latencies
+        return model_latencies_parameters
 
-    def throughput_parameters(self) -> Dict[str, Dict[str, List[float]]]:
-        """Generate throughput parameters for all models and batches."""
-        model_throughputs = {
-            task.name: {
-                variant: {
-                    batch: (task.change_batch(batch) or task.throughput)
-                    for batch in task.batches
-                }
-                for variant in task.variant_names
-            }
-            for task in deepcopy(self.pipeline.inference_graph)
-        }
+    # @lru_cache(maxsize=None)
+    def throughput_parameters(self) -> Tuple[List[int], Dict[str, Dict[str, Dict[int, float]]]]:
+        """
+        Computes throughput parameters for all stages, variants, and batch sizes.
+        Missing batches are assigned a very small dummy throughput value.
 
-        distinct_batches = sorted({
-            batch
-            for variants in model_throughputs.values()
-            for variant in variants.values()
-            for batch in variant.keys()
-        })
+        Returns:
+            (List[int], Dict[str, Dict[str, Dict[int, float]]]):
+                distinct_batches: A list of all distinct batch sizes.
+                model_throughputs: [stage][variant][batch] = throughput
+        """
+        model_throughputs: Dict[str, Dict[str, Dict[int, float]]] = {}
+        inference_graph = deepcopy(self.pipeline.inference_graph)
+        for task in inference_graph:
+            stage_dict = {}
+            for variant_name in task.variant_names:
+                variant_dict = {}
+                task.model_switch(variant_name)
+                for batch_size in task.batches:
+                    task.change_batch(batch_size)
+                    variant_dict[batch_size] = task.throughput
+                stage_dict[variant_name] = variant_dict
+            model_throughputs[task.name] = stage_dict
 
+        # Collect all distinct batch sizes
+        all_batch_sizes = set()
+        for stage_values in model_throughputs.values():
+            for variant_profile in stage_values.values():
+                all_batch_sizes.update(variant_profile.keys())
+        distinct_batches = sorted(all_batch_sizes)
+
+        # Fill missing batches with dummy throughput
         dummy_throughput = 0.00001
-        for variants in model_throughputs.values():
-            for variant in variants.values():
+        for stage, variants in model_throughputs.items():
+            for variant_name, variant_profile in variants.items():
                 for batch in distinct_batches:
-                    variant.setdefault(batch, dummy_throughput)
+                    if batch not in variant_profile:
+                        variant_profile[batch] = dummy_throughput
 
-        return model_throughputs
+        return distinct_batches, model_throughputs
 
+    # @lru_cache(maxsize=None)
     def accuracy_parameters(self) -> Dict[str, Dict[str, float]]:
-        """Generate accuracy parameters for all models."""
-        return {
-            task.name: {
-                variant: (task.model_switch(variant) or task.accuracy)
-                for variant in task.variant_names
-            }
-            for task in deepcopy(self.pipeline.inference_graph)
-        }
+        """
+        Computes accuracy parameters for all stages and variants.
 
+        Returns:
+            Dict[str, Dict[str, float]]: [stage_name][variant_name] = accuracy
+        """
+        model_accuracies: Dict[str, Dict[str, float]] = {}
+        inference_graph = deepcopy(self.pipeline.inference_graph)
+        for task in inference_graph:
+            stage_dict = {}
+            for variant_name in task.variant_names:
+                task.model_switch(variant_name)
+                stage_dict[variant_name] = task.accuracy
+            model_accuracies[task.name] = stage_dict
+        return model_accuracies
+
+    # @lru_cache(maxsize=None)
     def base_allocations(self) -> Dict[str, Dict[str, float]]:
-        """Retrieve base allocations for all models based on GPU mode."""
-        return {
-            task.name: {
-                key: value.gpu if self.pipeline.gpu_mode else value.cpu
-                for key, value in task.base_allocations.items()
-            }
-            for task in deepcopy(self.pipeline.inference_graph)
-        }
+        """
+        Computes base allocations of CPU or GPU for each stage and variant.
 
-    def q_learning_optimizer(
+        Returns:
+            Dict[str, Dict[str, float]]: [stage][variant] = base_allocation
+        """
+        base_allocs: Dict[str, Dict[str, float]] = {}
+        inference_graph = deepcopy(self.pipeline.inference_graph)
+        if self.pipeline.gpu_mode:
+            for task in inference_graph:
+                base_allocs[task.name] = {key: val.gpu for key, val in task.base_allocations.items()}
+        else:
+            for task in inference_graph:
+                base_allocs[task.name] = {key: val.cpu for key, val in task.base_allocations.items()}
+        return base_allocs
+
+    def all_states(
         self,
         scaling_cap: int,
-        batching_cap: int,
         alpha: float,
         beta: float,
         gamma: float,
+        check_constraints: bool,
         arrival_rate: int,
-        num_state_limit: int,
-        dir_path: str = None,
+        num_state_limit: int = None,
     ) -> pd.DataFrame:
-        self.only_measured_profiles = True  # Handle both cases using pre-calculated profiles
-        sla = self.pipeline.sla
-        stages = self.pipeline.stage_wise_task_names
-        stages_variants = self.pipeline.stage_wise_available_variants
+        """
+        Generates all possible states based on profiling data and configuration knobs.
 
-        # Retrieve parameters
-        base_allocations = self.base_allocations()
-        accuracy_params = self.accuracy_parameters()
+        Args:
+            scaling_cap (int): Max allowed scaling.
+            alpha (float): Weight for accuracy objective.
+            beta (float): Weight for resource objective.
+            gamma (float): Weight for batch objective.
+            check_constraints (bool): If True, only states that meet constraints are returned.
+            arrival_rate (int): Arrival rate.
+            num_state_limit (int, optional): Limit the number of states.
 
-        if self.only_measured_profiles:
-            throughput_params = self.throughput_parameters()
-            latency_params = self.latency_parameters(only_measured_profiles=True)
-            distinct_batches = sorted({
-                batch
-                for variants in throughput_params.values()
-                for variant in variants.values()
-                for batch in variant.keys()
-            })
-            distinct_batches = [batch for batch in distinct_batches if batch <= batching_cap]
+        Returns:
+            pd.DataFrame: DataFrame of all possible states.
+        """
+        if num_state_limit is not None:
+            state_counter = 0
+
+        variant_names_list = []
+        replicas_list = []
+        batches_list = []
+        allocations_list = []
+
+        for task in self.pipeline.inference_graph:
+            variant_names_list.append(task.variant_names)
+            replicas_list.append(np.arange(1, scaling_cap + 1))
+            batches_list.append(task.batches)
+            if self.allocation_mode == "variable":
+                if task.gpu_mode:
+                    allocations_list.append(task.resource_allocations_gpu_mode)
+                else:
+                    allocations_list.append(task.resource_allocations_cpu_mode)
+            elif self.allocation_mode == "fix":
+                allocations_list.append([task.initial_allocation])
+            elif self.allocation_mode == "base":
+                pass
+            else:
+                raise ValueError(f"Invalid allocation_mode: {self.allocation_mode}")
+
+        variant_names_product = list(itertools.product(*variant_names_list))
+        replicas_product = list(itertools.product(*replicas_list))
+        batches_product = list(itertools.product(*batches_list))
+
+        if self.allocation_mode != "base":
+            allocations_product = list(itertools.product(*allocations_list))
+            all_combinations = itertools.product(
+                variant_names_product, replicas_product, batches_product, allocations_product
+            )
         else:
-            latency_params = self.latency_parameters(only_measured_profiles=False)
+            all_combinations = itertools.product(
+                variant_names_product, replicas_product, batches_product
+            )
 
-        # Define action and state spaces
-        state_space = []
-        for stage in stages:
-            state_space.append({
-                'variants': stages_variants[stage],
-                'replicas': list(range(1, scaling_cap + 1)),
-                'batches': distinct_batches,
-            })
+        if self.random_sample and num_state_limit is not None:
+            all_combinations = random.sample(list(all_combinations), num_state_limit)
 
-        # Initialize Q-table
-        Q_table = {}
-
-        # Set Q-Learning parameters
-        learning_rate_q = 0.1
-        discount_factor_q = 0.9
-        exploration_rate = 1.0
-        min_exploration_rate = 0.01
-        exploration_decay_rate = 0.001
-        max_steps_per_episode = 100
-
-        num_episodes = num_state_limit  # Using num_state_limit as number of episodes
-
-        for episode in range(num_episodes):
-            # Initialize state randomly
-            state = {}
-            for stage in stages:
-                state[stage] = {
-                    'variant': random.choice(stages_variants[stage]),
-                    'replica': random.randint(1, scaling_cap),
-                    'batch': random.choice(distinct_batches),
-                }
-            for step in range(max_steps_per_episode):
-                # Choose an action using epsilon-greedy policy
-                if random.uniform(0, 1) > exploration_rate:
-                    # Exploit: select the action with max Q value
-                    state_key = tuple((stage, state[stage]['variant'], state[stage]['replica'],
-                                       state[stage]['batch']) for stage in stages)
-                    if state_key in Q_table and Q_table[state_key]:
-                        action = {}
-                        best_action = max(Q_table[state_key], key=Q_table[state_key].get)
-                        for idx, stage in enumerate(stages):
-                            action[stage] = {
-                                'variant': best_action[idx][1],
-                                'replica': best_action[idx][2],
-                                'batch': best_action[idx][3],
-                            }
-                    else:
-                        # If no action has been recorded for this state, choose randomly
-                        action = {}
-                        for stage in stages:
-                            action[stage] = {
-                                'variant':
-                                random.choice(stages_variants[stage]),
-                                'replica':
-                                random.randint(max(1, state[stage]['replica'] - 1),
-                                               min(scaling_cap, state[stage]['replica'] + 1)),
-                                'batch':
-                                random.choice(distinct_batches),
-                            }
+        states = []
+        # Process states
+        for combination in all_combinations:
+            try:
+                if self.allocation_mode != "base":
+                    model_variant_tuple, replica_tuple, batch_tuple, allocation_tuple = combination
                 else:
-                    # Explore: select a random action
-                    action = {}
-                    for stage in stages:
-                        action[stage] = {
-                            'variant':
-                            random.choice(stages_variants[stage]),
-                            'replica':
-                            random.randint(max(1, state[stage]['replica'] - 1),
-                                           min(scaling_cap, state[stage]['replica'] + 1)),
-                            'batch':
-                            random.choice(distinct_batches),
-                        }
-                # Apply action to get next state
-                next_state = {}
-                for stage in stages:
-                    next_state[stage] = {
-                        'variant': action[stage]['variant'],
-                        'replica': action[stage]['replica'],
-                        'batch': action[stage]['batch'],
-                    }
-                # Apply configurations to the pipeline
-                for task_id, stage in enumerate(stages):
-                    self.pipeline.inference_graph[task_id].model_switch(
-                        next_state[stage]['variant'])
-                    self.pipeline.inference_graph[task_id].re_scale(
-                        replica=next_state[stage]['replica'])
-                    self.pipeline.inference_graph[task_id].change_batch(
-                        batch=next_state[stage]['batch'])
+                    model_variant_tuple, replica_tuple, batch_tuple = combination
+                    allocation_tuple = None
 
-                # Check constraints
-                constraints_satisfied = self.constraints(arrival_rate=arrival_rate)
+                # Apply configuration
+                for task_id_i, task in enumerate(self.pipeline.inference_graph):
+                    task.model_switch(active_variant=model_variant_tuple[task_id_i])
+                    task.re_scale(replica=replica_tuple[task_id_i])
+                    task.change_batch(batch=batch_tuple[task_id_i])
+                    if self.allocation_mode != "base":
+                        task.change_allocation(active_allocation=allocation_tuple[task_id_i])
 
-                if not constraints_satisfied:
-                    reward = -1000  # Large negative reward for violating constraints
-                else:
-                    # Compute objectives
-                    obj = self.objective(alpha=alpha, beta=beta, gamma=gamma)
-                    reward = obj['objective']
+                ok_to_add = not check_constraints or self.constraints(arrival_rate=arrival_rate)
 
-                # Update Q-table
-                state_key = tuple((stage, state[stage]['variant'], state[stage]['replica'],
-                                   state[stage]['batch']) for stage in stages)
-                action_key = tuple((stage, action[stage]['variant'], action[stage]['replica'],
-                                    action[stage]['batch']) for stage in stages)
-                next_state_key = tuple((stage, next_state[stage]['variant'],
-                                        next_state[stage]['replica'], next_state[stage]['batch'])
-                                       for stage in stages)
+                if ok_to_add:
+                    state = {}
+                    # record complete profile if needed
+                    if self.complete_profile:
+                        for task_id_j, task_obj in enumerate(self.pipeline.inference_graph):
+                            state[f"task_{task_id_j}_latency"] = task_obj.latency
+                            state[f"task_{task_id_j}_throughput"] = task_obj.throughput
+                            state[f"task_{task_id_j}_throughput_all_replicas"] = task_obj.throughput_all_replicas
+                            state[f"task_{task_id_j}_accuracy"] = task_obj.accuracy
+                            state[f"task_{task_id_j}_measured"] = task_obj.measured
+                            state[f"task_{task_id_j}_cpu_all_replicas"] = task_obj.cpu_all_replicas
+                            state[f"task_{task_id_j}_gpu_all_replicas"] = task_obj.gpu_all_replicas
 
-                if state_key not in Q_table:
-                    Q_table[state_key] = {}
+                        state["pipeline_accuracy"] = self.pipeline.pipeline_accuracy
+                        state["pipeline_latency"] = self.pipeline.pipeline_latency
+                        state["pipeline_throughput"] = self.pipeline.pipeline_throughput
+                        state["pipeline_cpu"] = self.pipeline.pipeline_cpu
+                        state["pipeline_gpu"] = self.pipeline.pipeline_gpu
+                        state["alpha"] = alpha
+                        state["beta"] = beta
+                        state["gamma"] = gamma
+                        state["accuracy_objective"] = self.accuracy_objective()
+                        state["resource_objective"] = self.resource_objective()
+                        state["batch_objective"] = self.batch_objective()
 
-                if action_key not in Q_table[state_key]:
-                    Q_table[state_key][action_key] = 0
+                    # record minimal profile
+                    for task_id_j, task_obj in enumerate(self.pipeline.inference_graph):
+                        state[f"task_{task_id_j}_variant"] = task_obj.active_variant
+                        state[f"task_{task_id_j}_cpu"] = task_obj.cpu
+                        state[f"task_{task_id_j}_gpu"] = task_obj.gpu
+                        state[f"task_{task_id_j}_batch"] = task_obj.batch
+                        state[f"task_{task_id_j}_replicas"] = task_obj.replicas
 
-                # Estimate Q(s, a)
-                current_q = Q_table[state_key][action_key]
+                    state.update(self.objective(alpha=alpha, beta=beta, gamma=gamma))
+                    states.append(state)
+                    # print(f"state {state_counter} added.")
+                    if num_state_limit is not None:
+                        state_counter += 1
+                        if state_counter == num_state_limit:
+                            break
+            except StopIteration:
+                pass
 
-                # Get max Q for next state
-                if next_state_key in Q_table and Q_table[next_state_key]:
-                    max_future_q = max(Q_table[next_state_key].values())
-                else:
-                    max_future_q = 0
-
-                # Update Q value
-                new_q = current_q + learning_rate_q * (reward + discount_factor_q * max_future_q -
-                                                       current_q)
-                Q_table[state_key][action_key] = new_q
-
-                # Update state
-                state = next_state
-
-                # Decay exploration rate
-                exploration_rate = min_exploration_rate + (1.0 - min_exploration_rate) * np.exp(
-                    -exploration_decay_rate * episode)
-
-        # After training, extract the optimal policies
-        # For each state, select the action with the highest Q-value
-        optimal_states = []
-        for state_key in Q_table:
-            best_action = max(Q_table[state_key], key=Q_table[state_key].get)
-            optimal_state = {}
-            for idx, stage in enumerate(stages):
-                optimal_state[stage] = {
-                    'variant': best_action[idx][1],
-                    'replica': best_action[idx][2],
-                    'batch': best_action[idx][3],
-                }
-            # Apply configurations to the pipeline
-            for task_id, stage in enumerate(stages):
-                self.pipeline.inference_graph[task_id].model_switch(
-                    optimal_state[stage]['variant'])
-                self.pipeline.inference_graph[task_id].re_scale(
-                    replica=optimal_state[stage]['replica'])
-                self.pipeline.inference_graph[task_id].change_batch(
-                    batch=optimal_state[stage]['batch'])
-
-            # Check constraints
-            if not self.constraints(arrival_rate=arrival_rate):
-                continue
-
-            # Generate state data
-            state_data = {}
-            if self.complete_profile:
-                for task_id_j, task in enumerate(self.pipeline.inference_graph):
-                    state_data.update({
-                        f"task_{task_id_j}_latency": task.latency,
-                        f"task_{task_id_j}_throughput": task.throughput,
-                        f"task_{task_id_j}_throughput_all_replicas": task.throughput_all_replicas,
-                        f"task_{task_id_j}_accuracy": task.accuracy,
-                        f"task_{task_id_j}_measured": task.measured,
-                        f"task_{task_id_j}_cpu_all_replicas": task.cpu_all_replicas,
-                        f"task_{task_id_j}_gpu_all_replicas": task.gpu_all_replicas,
-                    })
-                state_data.update({
-                    "pipeline_accuracy": self.pipeline.pipeline_accuracy,
-                    "pipeline_latency": self.pipeline.pipeline_latency,
-                    "pipeline_throughput": self.pipeline.pipeline_throughput,
-                    "pipeline_cpu": self.pipeline.pipeline_cpu,
-                    "pipeline_gpu": self.pipeline.pipeline_gpu,
-                    "alpha": alpha,
-                    "beta": beta,
-                    "gamma": gamma,
-                    "accuracy_objective": self.accuracy_objective(),
-                    "resource_objective": self.resource_objective(),
-                    "batch_objective": self.batch_objective(),
-                })
-
-            for task_id_j, task in enumerate(self.pipeline.inference_graph):
-                state_data.update({
-                    f"task_{task_id_j}_variant": task.active_variant,
-                    f"task_{task_id_j}_cpu": task.cpu,
-                    f"task_{task_id_j}_gpu": task.gpu,
-                    f"task_{task_id_j}_batch": task.batch,
-                    f"task_{task_id_j}_replicas": task.replicas,
-                })
-
-            state_data.update(self.objective(alpha=alpha, beta=beta, gamma=gamma))
-            optimal_states.append(state_data)
-
-            if len(optimal_states) >= num_state_limit:
-                break
-
-        return pd.DataFrame(optimal_states)
+        return pd.DataFrame(states)
 
     def brute_force(
         self,
@@ -403,19 +410,19 @@ class Optimizer:
         arrival_rate: int,
         num_state_limit: int = None,
     ) -> pd.DataFrame:
-        """Perform brute-force optimization to find the optimal state.
+        """
+        Performs a brute-force search over all states and returns the optimal state(s).
 
         Args:
-            scaling_cap (int): Maximum number of allowed horizontal scaling for each node.
-            alpha (float): Weight for accuracy objective.
-            beta (float): Weight for resource usage objective.
-            gamma (float): Weight for batch size objective.
-            arrival_rate (int): Arrival rate into the pipeline.
-            num_state_limit (int, optional): Limit on the number of states to evaluate.
-                Defaults to None.
+            scaling_cap (int): Max scaling.
+            alpha (float): Accuracy weight.
+            beta (float): Resource usage weight.
+            gamma (float): Batch size weight.
+            arrival_rate (int): Input arrival rate.
+            num_state_limit (int, optional): Limit states.
 
         Returns:
-            pd.DataFrame: DataFrame containing the optimal states.
+            pd.DataFrame: DataFrame of optimal states.
         """
         states = self.all_states(
             check_constraints=True,
@@ -426,8 +433,11 @@ class Optimizer:
             arrival_rate=arrival_rate,
             num_state_limit=num_state_limit,
         )
-        max_objective = states["objective"].max()
-        optimal = states[states["objective"] == max_objective]
+        if states.empty:
+            print("No feasible states found using brute-force optimization.")
+            return states
+        optimal = states[states["objective"] == states["objective"].max()]
+        # print(f"state {len(optimal)} optimal state(s) found using brute-force optimization.")
         return optimal
 
     def gurobi_optimizer(
@@ -441,312 +451,278 @@ class Optimizer:
         num_state_limit: int,
         dir_path: str = None,
     ) -> pd.DataFrame:
-        """Optimize pipeline configuration using Gurobi solver.
+        """
+        Uses Gurobi to solve the optimization problem.
 
         Args:
-            scaling_cap (int): Maximum number of allowed horizontal scaling for each node.
-            batching_cap (int): Maximum batch size allowed.
-            alpha (float): Weight for accuracy objective.
-            beta (float): Weight for resource usage objective.
-            gamma (float): Weight for batch size objective.
-            arrival_rate (int): Arrival rate into the pipeline.
-            num_state_limit (int): Number of optimal states to retrieve.
-            dir_path (str, optional): Directory path to save the model. Defaults to None.
+            scaling_cap (int): Max allowed horizontal scaling.
+            batching_cap (int): Max allowed batch size.
+            alpha (float): Accuracy weight.
+            beta (float): Resource weight.
+            gamma (float): Batch weight.
+            arrival_rate (int): Input arrival rate.
+            num_state_limit (int): Limit solutions to retrieve.
+            dir_path (str, optional): Directory path to write LP file.
 
         Returns:
-            pd.DataFrame: DataFrame containing the optimal states.
+            pd.DataFrame: DataFrame of solutions.
         """
-        self.only_measured_profiles = True  # Handle both cases using pre-calculated profiles
+        self.only_measured_profiles = True
         sla = self.pipeline.sla
         stages = self.pipeline.stage_wise_task_names
         stages_variants = self.pipeline.stage_wise_available_variants
 
-        # Retrieve parameters
         base_allocations = self.base_allocations()
-        accuracy_params = self.accuracy_parameters()
+        accuracy_parameters = self.accuracy_parameters()
+        distinct_batches, throughput_parameters = self.throughput_parameters()
+        latency_parameters = self.latency_parameters(
+            only_measured_profiles=self.only_measured_profiles
+        )
+        distinct_batches = [b for b in distinct_batches if b <= batching_cap]
 
-        if self.only_measured_profiles:
-            distinct_batches, throughput_params = self.throughput_parameters()
-            latency_params = self.latency_parameters(only_measured_profiles=True)
-            distinct_batches = [batch for batch in distinct_batches if batch <= batching_cap]
-        else:
-            latency_params = self.latency_parameters(only_measured_profiles=False)
+        def func_q(batch: int, arrival_rate_: int) -> float:
+            # queueing delay approximation
+            if arrival_rate_ == 0:
+                return 0.0
+            return (batch - 1) / arrival_rate_
 
-        # Initialize Gurobi model
         model = gp.Model("pipeline")
+        gurobi_variants = [(stg, var) for stg in stages for var in stages_variants[stg]]
+        i = model.addVars(gurobi_variants, name="i", vtype=GRB.BINARY)
+        n = model.addVars(stages, name="n", vtype=GRB.INTEGER, lb=1, ub=scaling_cap)
+        b = model.addVars(stages, distinct_batches, name="b", vtype=GRB.BINARY)
+        aux_batch = model.addVars(gurobi_variants, distinct_batches, name="aux", vtype=GRB.BINARY)
 
-        # Define variables
-        variant_vars = model.addVars([(stage, variant) for stage in stages
-                                      for variant in stages_variants[stage]],
-                                     name="i",
-                                     vtype=GRB.BINARY)
-
-        replica_vars = model.addVars(stages, name="n", vtype=GRB.INTEGER, lb=1, ub=scaling_cap)
-
-        if self.only_measured_profiles:
-            batch_vars = model.addVars([(stage, batch) for stage in stages
-                                        for batch in distinct_batches],
-                                       name="b",
-                                       vtype=GRB.BINARY)
-            aux_batch_vars = model.addVars([(stage, variant, batch) for stage in stages
-                                            for variant in stages_variants[stage]
-                                            for batch in distinct_batches],
-                                           name="aux",
-                                           vtype=GRB.BINARY)
-        else:
-            batch_vars = model.addVars(stages, name="b", vtype=GRB.INTEGER, lb=1, ub=batching_cap)
-            # Enforce batch sizes to be powers of 2
-            batch_sizes = [2**i for i in range(int(math.log2(batching_cap)) + 1)]
-            batch_size_indicator = model.addVars([(stage, size) for stage in stages
-                                                  for size in batch_sizes],
-                                                 vtype=GRB.BINARY,
-                                                 name="batch_size_indicator")
-
-        model.update()
-
-        # Define helper functions
-        def latency_function(batch: int, params: Dict[str, float]) -> float:
-            """Calculate latency using a quadratic model."""
-            coefficients = params["coefficients"]
-            intercept = params["intercept"][0]
-            return (coefficients[2] * (batch**2) + coefficients[1] * batch + coefficients[0] +
-                    intercept)
-
-        def queueing_latency(batch: int, arrival_rate: int) -> float:
-            """Calculate queueing latency based on batch size and arrival rate."""
-            return 0.0 if arrival_rate == 0 else (batch - 1) / arrival_rate
-
-        # Add constraints
-        if self.only_measured_profiles:
-            # Throughput constraints
-            for stage in stages:
-                for variant in stages_variants[stage]:
-                    for batch in distinct_batches:
-                        model.addGenConstrAnd(
-                            aux_batch_vars[stage, variant, batch],
-                            [variant_vars[stage, variant], batch_vars[stage, batch]],
-                            f"andconstr-{stage}-{variant}-{batch}")
-                        model.addConstr(aux_batch_vars[stage, variant, batch] == 1 >>
-                                        (replica_vars[stage] *
-                                         throughput_params[stage][variant][batch] >= arrival_rate),
-                                        name=f"throughput-{stage}-{variant}-{batch}")
-            # Latency constraint
-            total_latency = gp.quicksum(latency_params[stage][variant][batch] *
-                                        variant_vars[stage, variant] * batch_vars[stage, batch] +
-                                        queueing_latency(batch, arrival_rate) for stage in stages
-                                        for variant in stages_variants[stage]
-                                        for batch in distinct_batches)
-            model.addConstr(total_latency <= sla, name="latency")
-
-            # Ensure only one batch size is selected per stage
-            for stage in stages:
-                model.addConstr(gp.quicksum(batch_vars[stage, batch]
-                                            for batch in distinct_batches) == 1,
-                                name=f"single-batch-{stage}")
-        else:
-            # Throughput constraints
-            for stage in stages:
-                for variant in stages_variants[stage]:
-                    latency_upper = self.pipeline_latency_upper_bound(stage, variant)
+        # Constraints
+        # Throughput constraints
+        for stage in stages:
+            for variant in stages_variants[stage]:
+                for batch in distinct_batches:
+                    model.addGenConstrAnd(
+                        aux_batch[stage, variant, batch],
+                        [i[stage, variant], b[stage, batch]],
+                        name=f"andconstr-batch-variant-{stage}-{variant}-{batch}"
+                    )
                     model.addConstr(
-                        arrival_rate *
-                        latency_function(batch_vars[stage], latency_params[stage][variant]) -
-                        replica_vars[stage] * batch_vars[stage]
-                        <= (arrival_rate * latency_upper - 1) * (1 - variant_vars[stage, variant]),
-                        name=f"throughput-{stage}-{variant}")
-            # Latency constraint
-            total_latency = gp.quicksum(
-                latency_function(batch_vars[stage], latency_params[stage][variant]) *
-                variant_vars[stage, variant] + queueing_latency(batch_vars[stage], arrival_rate)
-                for stage in stages for variant in stages_variants[stage])
-            model.addConstr(total_latency <= sla, name="latency")
+                        (aux_batch[stage, variant, batch] == 1) >>
+                        (n[stage] * throughput_parameters[stage][variant][batch] >= arrival_rate)
+                    )
 
-            # Enforce batch sizes to be powers of 2
-            for stage in stages:
-                model.addConstr(gp.quicksum(batch_size_indicator[stage, size]
-                                            for size in batch_sizes) == 1,
-                                name=f"one-batch-size-{stage}")
-                for size in batch_sizes:
-                    model.addConstr(batch_vars[stage]
-                                    >= size - (max(batch_sizes) - min(batch_sizes)) *
-                                    (1 - batch_size_indicator[stage, size]),
-                                    name=f"batch-lb-{stage}-{size}")
-                    model.addConstr(batch_vars[stage]
-                                    <= size + (max(batch_sizes) - min(batch_sizes)) *
-                                    (1 - batch_size_indicator[stage, size]),
-                                    name=f"batch-ub-{stage}-{size}")
+        # Latency constraint
+        model.addQConstr(
+            gp.quicksum(
+                latency_parameters[stage][variant][batch] * i[stage, variant] * b[stage, batch] +
+                func_q(batch, arrival_rate)
+                for stage in stages
+                for variant in stages_variants[stage]
+                for batch in distinct_batches
+            ) <= sla,
+            name="latency",
+        )
 
-        # Baseline mode constraints
+        # One batch per stage
+        for stage in stages:
+            model.addConstr(
+                gp.quicksum(b[stage, batch] for batch in distinct_batches) == 1,
+                name=f"single-batch-{stage}"
+            )
+
+        # Baseline modes
         if self.baseline_mode == "scale":
             for task in self.pipeline.inference_graph:
-                model.addConstr(variant_vars[task.name, task.active_variant] == 1,
-                                name=f"only-scale-{task.name}")
+                model.addConstr(i[task.name, task.active_variant] == 1, name=f"only-scale-task-{task.name}")
         elif self.baseline_mode == "switch":
             for task in self.pipeline.inference_graph:
-                model.addConstr(replica_vars[task.name] == task.replicas,
-                                name=f"only-switch-{task.name}")
-        elif self.baseline_mode == "switch-scale":
-            # TODO: Implement switch-scale baseline constraints
-            pass
+                model.addConstr(n[task.name] == task.replicas, name=f"only-switch-task-{task.name}")
 
-        # Ensure only one variant is active per stage
+        # Only one active variant per stage
         for stage in stages:
-            model.addConstr(gp.quicksum(variant_vars[stage, variant]
-                                        for variant in stages_variants[stage]) == 1,
-                            name=f"one_variant-{stage}")
+            model.addConstr(
+                gp.quicksum(i[stage, variant] for variant in stages_variants[stage]) == 1,
+                name=f"one_model_{stage}"
+            )
 
-        # Define objectives
+        # Accuracy objective
         if self.pipeline.accuracy_method == "multiply":
             if len(stages) <= 2:
-                accuracy_objective = gp.LinExpr()
+                # two-stage multiply accuracy
+                accuracy_objective = 1.0
                 for stage in stages:
-                    for variant in stages_variants[stage]:
-                        accuracy_objective += accuracy_params[stage][variant] * variant_vars[
-                            stage, variant]
-                accuracy_objective = gp.quicksum([
-                    accuracy_params[stage][variant] * variant_vars[stage, variant]
-                    for stage in stages for variant in stages_variants[stage]
-                ])
-            else:
-                # Handle multiplication of accuracies for up to three stages
-                all_combinations = list(
-                    itertools.product(*[stages_variants[stage] for stage in stages]))
-                combination_vars = model.addVars(all_combinations, name="comb_i", vtype=GRB.BINARY)
-                accuracy_obj = model.addVar(name="accuracy_objective",
-                                            vtype=GRB.CONTINUOUS,
-                                            lb=0,
-                                            ub=1)
-                model.addConstr(gp.quicksum(combination_vars[comb]
-                                            for comb in all_combinations) == 1,
-                                name='one_model_comb')
-                for comb in all_combinations:
-                    model.addConstr(combination_vars[comb] ==
-                                    1 >> gp.quicksum(variant_vars[stages[i], comb[i]]
-                                                     for i in range(len(stages))) == len(stages),
-                                    name=f"combination_{comb}")
-                    comb_accuracy = math.prod(
-                        [accuracy_params[stages[i]][comb[i]] for i in range(len(stages))])
-                    model.addConstr(combination_vars[comb] * comb_accuracy == accuracy_obj,
-                                    name=f"accuracy_comb_{comb}")
-                accuracy_objective = accuracy_obj
+                    stage_accuracy_expr = gp.quicksum(
+                        accuracy_parameters[stage][variant] * i[stage, variant]
+                        for variant in stages_variants[stage]
+                    )
+                    # For multiply, we approximate by introducing a product of linear terms:
+                    # With 2 stages max in the simplified scenario, we can handle directly:
+                    # accuracy_objective *= stage_accuracy_expr won't directly work in Gurobi
+                    # For a 2-stage scenario, just handle it as a separate variable and constraint:
+                # If exactly 2 stages:
+                if len(stages) == 2:
+                    # We'll create variables for individual stage accuracies
+                    accuracy_stage_0 = model.addVar(lb=0, ub=1, name="accuracy_stage_0")
+                    accuracy_stage_1 = model.addVar(lb=0, ub=1, name="accuracy_stage_1")
+                    model.addConstr(
+                        accuracy_stage_0 == gp.quicksum(
+                            accuracy_parameters[stages[0]][variant] * i[stages[0], variant]
+                            for variant in stages_variants[stages[0]]
+                        ),
+                        name="accuracy_stage_0_def"
+                    )
+                    model.addConstr(
+                        accuracy_stage_1 == gp.quicksum(
+                            accuracy_parameters[stages[1]][variant] * i[stages[1], variant]
+                            for variant in stages_variants[stages[1]]
+                        ),
+                        name="accuracy_stage_1_def"
+                    )
+                    accuracy_objective_var = model.addVar(lb=0, ub=1, name="accuracy_objective")
+                    model.addGenConstrMul(accuracy_objective_var, accuracy_stage_0, accuracy_stage_1, name="accuracy_multiply")
+                    accuracy_objective = accuracy_objective_var
+                else:
+                    # Handle multi-stage multiply accuracy
+                    first_stage_variants = stages_variants[stages[0]]
+                    second_stage_variants = stages_variants[stages[1]]
+                    third_stage_variants = stages_variants[stages[2]]
+                    all_pipeline_variant_combinations = list(
+                        itertools.product(first_stage_variants, second_stage_variants, third_stage_variants)
+                    )
+                    all_comb_i = model.addVars(all_pipeline_variant_combinations, name="all_comb_i", vtype=GRB.INTEGER, lb=0, ub=1)
+                    accuracy_objective_var = model.addVar(name="accuracy_objective", vtype=GRB.CONTINUOUS, lb=0, ub=1)
+                    model.addConstr(
+                        gp.quicksum(all_comb_i[combination] for combination in all_pipeline_variant_combinations) == 1,
+                        name='one-model-combs'
+                    )
+                    for combination in all_pipeline_variant_combinations:
+                        model.addConstr(
+                            (all_comb_i[combination] == 1) >>
+                            ((i[stages[0], combination[0]] +
+                              i[stages[1], combination[1]] +
+                              i[stages[2], combination[2]]) == 3),
+                            name=f"accuracy_combo_{combination}"
+                        )
+                        combination_accuracy = (
+                            accuracy_parameters[stages[0]][combination[0]] *
+                            accuracy_parameters[stages[1]][combination[1]] *
+                            accuracy_parameters[stages[2]][combination[2]]
+                        )
+                        model.addConstr(
+                            (all_comb_i[combination] == 1) >> (accuracy_objective_var == combination_accuracy),
+                            name=f"accuracy_value_{combination}"
+                        )
+                    accuracy_objective = accuracy_objective_var
         elif self.pipeline.accuracy_method == "sum":
-            accuracy_objective = gp.quicksum(accuracy_params[stage][variant] *
-                                             variant_vars[stage, variant] for stage in stages
-                                             for variant in stages_variants[stage])
+            accuracy_objective = gp.quicksum(
+                accuracy_parameters[stage][variant] * i[stage, variant]
+                for stage in stages
+                for variant in stages_variants[stage]
+            )
         elif self.pipeline.accuracy_method == "average":
             accuracy_objective = gp.quicksum(
-                (accuracy_params[stage][variant] * variant_vars[stage, variant]) / len(stages)
-                for stage in stages for variant in stages_variants[stage])
+                accuracy_parameters[stage][variant] * i[stage, variant] * (1.0 / len(stages))
+                for stage in stages
+                for variant in stages_variants[stage]
+            )
         else:
             raise ValueError(f"Invalid accuracy method {self.pipeline.accuracy_method}")
 
-        resource_objective = gp.quicksum(base_allocations[stage][variant] * replica_vars[stage] *
-                                         variant_vars[stage, variant] for stage in stages
-                                         for variant in stages_variants[stage])
+        resource_objective = gp.quicksum(
+            base_allocations[stage][variant] * n[stage] * i[stage, variant]
+            for stage in stages
+            for variant in stages_variants[stage]
+        )
+        batch_objective = gp.quicksum(
+            batch * b[stage, batch]
+            for stage in stages
+            for batch in distinct_batches
+        )
 
-        if self.only_measured_profiles:
-            batch_objective = gp.quicksum(batch * batch_vars[stage, batch] for stage in stages
-                                          for batch in distinct_batches)
-        else:
-            batch_objective = gp.quicksum(batch_vars[stage] for stage in stages)
-
-        # Set objective
         model.setObjective(
             alpha * accuracy_objective - beta * resource_objective - gamma * batch_objective,
-            GRB.MAXIMIZE)
+            GRB.MAXIMIZE
+        )
 
-        # Configure model parameters
+        # Gurobi parameters
         model.Params.PoolSearchMode = 2
         model.Params.LogToConsole = 0
         model.Params.PoolSolutions = num_state_limit
         model.Params.PoolGap = 0.0
-        model.Params.NonConvex = 2  # Enable non-convex quadratic constraints
+        model.Params.NonConvex = 2
 
-        model.update()
-
-        # Optimize the model
         model.optimize()
 
-        if dir_path:
+        if dir_path is not None:
             model.write(os.path.join(dir_path, "unmeasured.lp"))
 
-        # Extract solutions
         states = []
-        for sol_num in range(model.SolCount):
-            model.Params.SolutionNumber = sol_num
-            solution = model.getVars()
-            var_values = {var.varName: var.Xn for var in solution}
+        for solution_count in range(model.SolCount):
+            model.Params.SolutionNumber = solution_count
+            all_vars = {v.varName: v.Xn for v in model.getVars()}
 
-            # Extract variant selections
-            i_output = {}
-            for var_name, value in var_values.items():
-                if var_name.startswith("i[") and value > 0.5:
-                    # Extract stage and variant from var_name, e.g., 'i[stage,variant]'
-                    parts = var_name[2:-1].split(",")
-                    if len(parts) == 2:
-                        stage, variant = parts
-                        i_output[stage.strip()] = variant.strip()
+            i_var_output = {key: round(value) for key, value in all_vars.items() if key.startswith("i[")}
+            n_var_output = {key: round(value) for key, value in all_vars.items() if key.startswith("n[")}
+            b_var_output = {key: round(value) for key, value in all_vars.items() if key.startswith("b[")}
 
-            # Extract replica counts
-            n_output = {stage: int(var_values.get(f"n[{stage}]", 1)) for stage in stages}
+            i_output: Dict[str, str] = {}
+            for stage in stages:
+                chosen_variants = [(var, val) for (st, var), val in i_var_output.items() if st == stage and val == 1]
+                if chosen_variants:
+                    i_output[stage] = chosen_variants[0][0]
 
-            # Extract batch sizes
-            if self.only_measured_profiles:
-                b_output = {}
-                for stage in stages:
-                    for batch in distinct_batches:
-                        if var_values.get(f"b[{stage},{batch}]", 0) > 0.5:
-                            b_output[stage] = batch
-                            break
-            else:
-                b_output = {stage: int(var_values.get(f"b[{stage}]", 1)) for stage in stages}
+            n_output: Dict[str, int] = {}
+            for stage in stages:
+                vals = [val for key, val in n_var_output.items() if stage in key]
+                n_output[stage] = vals[0] if vals else 1
 
-            # Apply configurations to the pipeline
+            b_output: Dict[str, int] = {}
+            for stage in stages:
+                stage_batches = [(batch, val) for (st, batch), val in b_var_output.items() if st == stage and val == 1]
+                if stage_batches:
+                    b_output[stage] = stage_batches[0][0]
+
+            # Apply solution to pipeline
             for task_id, stage in enumerate(stages):
-                self.pipeline.inference_graph[task_id].model_switch(
-                    i_output.get(stage, "default_variant"))
-                self.pipeline.inference_graph[task_id].re_scale(replica=n_output.get(stage, 1))
-                self.pipeline.inference_graph[task_id].change_batch(batch=b_output.get(stage, 1))
+                self.pipeline.inference_graph[task_id].model_switch(i_output[stage])
+                self.pipeline.inference_graph[task_id].re_scale(n_output[stage])
+                self.pipeline.inference_graph[task_id].change_batch(b_output[stage])
 
-            # Generate state data
             state = {}
             if self.complete_profile:
-                for task_id_j, task in enumerate(self.pipeline.inference_graph):
-                    state.update({
-                        f"task_{task_id_j}_latency": task.latency,
-                        f"task_{task_id_j}_throughput": task.throughput,
-                        f"task_{task_id_j}_throughput_all_replicas": task.throughput_all_replicas,
-                        f"task_{task_id_j}_accuracy": task.accuracy,
-                        f"task_{task_id_j}_measured": task.measured,
-                        f"task_{task_id_j}_cpu_all_replicas": task.cpu_all_replicas,
-                        f"task_{task_id_j}_gpu_all_replicas": task.gpu_all_replicas,
-                    })
-                state.update({
-                    "pipeline_accuracy": self.pipeline.pipeline_accuracy,
-                    "pipeline_latency": self.pipeline.pipeline_latency,
-                    "pipeline_throughput": self.pipeline.pipeline_throughput,
-                    "pipeline_cpu": self.pipeline.pipeline_cpu,
-                    "pipeline_gpu": self.pipeline.pipeline_gpu,
-                    "alpha": alpha,
-                    "beta": beta,
-                    "gamma": gamma,
-                    "accuracy_objective": self.accuracy_objective(),
-                    "resource_objective": self.resource_objective(),
-                    "batch_objective": self.batch_objective(),
-                })
+                for task_id_j, task_obj in enumerate(self.pipeline.inference_graph):
+                    state[f"task_{task_id_j}_latency"] = task_obj.latency
+                    state[f"task_{task_id_j}_throughput"] = task_obj.throughput
+                    state[f"task_{task_id_j}_throughput_all_replicas"] = task_obj.throughput_all_replicas
+                    state[f"task_{task_id_j}_accuracy"] = task_obj.accuracy
+                    state[f"task_{task_id_j}_measured"] = task_obj.measured
+                    state[f"task_{task_id_j}_cpu_all_replicas"] = task_obj.cpu_all_replicas
+                    state[f"task_{task_id_j}_gpu_all_replicas"] = task_obj.gpu_all_replicas
 
-            for task_id_j, task in enumerate(self.pipeline.inference_graph):
-                state.update({
-                    f"task_{task_id_j}_variant": task.active_variant,
-                    f"task_{task_id_j}_cpu": task.cpu,
-                    f"task_{task_id_j}_gpu": task.gpu,
-                    f"task_{task_id_j}_batch": task.batch,
-                    f"task_{task_id_j}_replicas": task.replicas,
-                })
+                state["pipeline_accuracy"] = self.pipeline.pipeline_accuracy
+                state["pipeline_latency"] = self.pipeline.pipeline_latency
+                state["pipeline_throughput"] = self.pipeline.pipeline_throughput
+                state["pipeline_cpu"] = self.pipeline.pipeline_cpu
+                state["pipeline_gpu"] = self.pipeline.pipeline_gpu
+                state["alpha"] = alpha
+                state["beta"] = beta
+                state["gamma"] = gamma
+                state["accuracy_objective"] = self.accuracy_objective()
+                state["resource_objective"] = self.resource_objective()
+                state["batch_objective"] = self.batch_objective()
+
+            for task_id_j, task_obj in enumerate(self.pipeline.inference_graph):
+                state[f"task_{task_id_j}_variant"] = task_obj.active_variant
+                state[f"task_{task_id_j}_cpu"] = task_obj.cpu
+                state[f"task_{task_id_j}_gpu"] = task_obj.gpu
+                state[f"task_{task_id_j}_batch"] = task_obj.batch
+                state[f"task_{task_id_j}_replicas"] = task_obj.replicas
 
             state.update(self.objective(alpha=alpha, beta=beta, gamma=gamma))
             states.append(state)
 
+        if not states:
+            print("No feasible solutions found using Gurobi optimization.")
+            return pd.DataFrame([])
+
+        print(f"Gurobi optimization recorded {len(states)} solution(s).")
         return pd.DataFrame(states)
 
     def optimize(
@@ -761,26 +737,25 @@ class Optimizer:
         batching_cap: int = None,
         dir_path: str = None,
     ) -> pd.DataFrame:
-        """Select and execute the optimization method.
+        """
+        Main interface to run the optimization using either brute force, Gurobi, or Q-Learning.
 
         Args:
-            optimization_method (str): The optimization method to use
-                ('brute-force', 'gurobi' or 'q-learning').
-            scaling_cap (int): Maximum number of allowed horizontal scaling for each node.
-            alpha (float): Weight for accuracy objective.
-            beta (float): Weight for resource usage objective.
-            gamma (float): Weight for batch size objective.
-            arrival_rate (int): Arrival rate into the pipeline.
-            num_state_limit (int, optional): Number of optimal states to retrieve.
-                Defaults to None.
-            batching_cap (int, optional): Maximum batch size allowed for Gurobi. Required if
-                method is 'gurobi'.
-            dir_path (str, optional): Directory path to save the model. Defaults to None.
+            optimization_method (str): "brute-force", "gurobi", or "q-learning".
+            scaling_cap (int): Maximum horizontal scaling.
+            alpha (float): Accuracy weight.
+            beta (float): Resource weight.
+            gamma (float): Batch weight.
+            arrival_rate (int): Input arrival rate.
+            num_state_limit (int, optional): Limit number of states/solutions.
+            batching_cap (int, optional): Maximum batch size (for gurobi or q-learning).
+            dir_path (str, optional): Directory to store model files.
 
         Returns:
-            pd.DataFrame: DataFrame containing the optimal states.
+            pd.DataFrame: Optimal states as a DataFrame.
         """
         if optimization_method == "brute-force":
+            print("brute-force optimization selected.")
             optimal = self.brute_force(
                 scaling_cap=scaling_cap,
                 alpha=alpha,
@@ -790,8 +765,9 @@ class Optimizer:
                 num_state_limit=num_state_limit,
             )
         elif optimization_method == "gurobi":
+            print("Gurobi optimization selected.")
             if batching_cap is None:
-                raise ValueError("batching_cap must be provided for Gurobi optimization.")
+                raise ValueError("batching_cap must be provided for gurobi optimization.")
             optimal = self.gurobi_optimizer(
                 scaling_cap=scaling_cap,
                 batching_cap=batching_cap,
@@ -803,9 +779,10 @@ class Optimizer:
                 dir_path=dir_path,
             )
         elif optimization_method == "q-learning":
+            print("Q-Learning optimization selected.")
             if batching_cap is None:
-                raise ValueError("batching_cap must be provided for Q-Learning optimization.")
-            optimal = self.q_learning_optimizer(
+                raise ValueError("batching_cap must be provided for q-learning optimization.")
+            optimal = self.q_learning(
                 scaling_cap=scaling_cap,
                 batching_cap=batching_cap,
                 alpha=alpha,
@@ -820,19 +797,23 @@ class Optimizer:
         return optimal
 
     def can_sustain_load(self, arrival_rate: int) -> bool:
-        """Check if the existing configuration can sustain the given load.
+        """
+        Checks whether the current pipeline configuration can sustain the given load.
 
         Args:
-            arrival_rate (int): The incoming load rate.
+            arrival_rate (int): The arrival rate to test.
 
         Returns:
-            bool: True if the load can be sustained, False otherwise.
+            bool: True if pipeline can sustain the load, False otherwise.
         """
-        return all(arrival_rate <= task.throughput_all_replicas
-                   for task in self.pipeline.inference_graph)
+        for task in self.pipeline.inference_graph:
+            if arrival_rate > task.throughput_all_replicas:
+                return False
+        return True
 
     def sla_is_met(self) -> bool:
-        """Check if the pipeline's latency meets the SLA.
+        """
+        Checks if the current pipeline SLA is met.
 
         Returns:
             bool: True if SLA is met, False otherwise.
@@ -840,28 +821,242 @@ class Optimizer:
         return self.pipeline.pipeline_latency < self.pipeline.sla
 
     def find_load_bottlenecks(self, arrival_rate: int) -> List[int]:
-        """Identify tasks that are bottlenecks for the given load.
+        """
+        Finds the bottleneck tasks that cannot handle the given arrival rate.
 
         Args:
-            arrival_rate (int): The incoming load rate.
-
-        Raises:
-            ValueError: If the load can be sustained by all tasks.
+            arrival_rate (int): The arrival rate to test.
 
         Returns:
             List[int]: List of task indices that are bottlenecks.
         """
         if self.can_sustain_load(arrival_rate=arrival_rate):
-            raise ValueError("The load can be sustained! No bottleneck detected.")
-        return [
-            task_id for task_id, task in enumerate(self.pipeline.inference_graph)
-            if arrival_rate > task.throughput_all_replicas
-        ]
+            raise ValueError("The load can be sustained! No bottleneck!")
+        bottlenecks = []
+        for task_id, task in enumerate(self.pipeline.inference_graph):
+            if arrival_rate > task.throughput_all_replicas:
+                bottlenecks.append(task_id)
+        return bottlenecks
 
     def get_one_answer(self) -> Dict:
-        """Retrieve one optimal configuration.
+        """
+        Returns one feasible answer from the optimizer.
+        Currently not implemented.
 
         Returns:
-            Dict: A dictionary representing one optimal state.
+            Dict: Empty dict as placeholder.
         """
-        pass
+        return {}
+
+    def q_learning(
+        self,
+        scaling_cap: int,
+        batching_cap: int,
+        alpha: float,
+        beta: float,
+        gamma: float,
+        arrival_rate: int,
+        num_state_limit: int,
+        dir_path: str = None,
+    ) -> pd.DataFrame:
+        """
+        Q-Learning based optimization.
+
+        We define:
+        - State: For each stage, an index for variant, replicas, batch.
+        - Actions: Change one aspect of a single stage (variant, replicas, batch).
+        - Reward: Objective if feasible, else large negative.
+
+        Steps:
+        - Initialize Q-table as a dict: Q[(state),(action)] = float
+        - Epsilon-greedy exploration
+        - Run episodes to improve Q
+        - Return best found state.
+
+        Args:
+            scaling_cap (int), batching_cap (int): define search space.
+            alpha, beta, gamma (float): weights for objective.
+            arrival_rate (int): load.
+            num_state_limit (int): number of episodes (or steps).
+            dir_path (Optional[str]): unused, for consistency.
+
+        Returns:
+            pd.DataFrame: Best found configuration.
+        """
+
+        stages = self.pipeline.stage_wise_task_names
+        stages_variants = self.pipeline.stage_wise_available_variants
+        distinct_batches, _ = self.throughput_parameters()
+        distinct_batches = [b for b in distinct_batches if b <= batching_cap]
+
+        # Map variants and batches to indices for easier handling
+        stage_variant_options = [list(variants) for variants in stages_variants.values()]
+        stage_batch_options = [distinct_batches for _ in stages]
+
+        # State representation: tuple of ( (var_idx, replica, batch_idx), ... ) per stage
+        def get_state():
+            return tuple(
+                (
+                    stage_variant_options[s].index(self.pipeline.inference_graph[s].active_variant),
+                    self.pipeline.inference_graph[s].replicas,
+                    stage_batch_options[s].index(self.pipeline.inference_graph[s].batch),
+                )
+                for s in range(len(stages))
+            )
+
+        # Apply state to pipeline
+        def apply_state(state):
+            for s, (v_idx, r, b_idx) in enumerate(state):
+                var = stage_variant_options[s][v_idx]
+                batch_val = stage_batch_options[s][b_idx]
+                self.pipeline.inference_graph[s].model_switch(var)
+                self.pipeline.inference_graph[s].re_scale(r)
+                self.pipeline.inference_graph[s].change_batch(batch_val)
+
+        def compute_reward():
+            # If constraints not met, large negative
+            if not self.constraints(arrival_rate):
+                return -1e6
+            return self.objective(alpha=alpha, beta=beta, gamma=gamma)["objective"]
+
+        # Actions: For each stage, we can:
+        # 1. next variant, prev variant
+        # 2. increase replicas, decrease replicas
+        # 3. next batch, prev batch
+        # This gives up to 6 actions per stage.
+        # Total actions = 6 * num_stages
+        # We'll encode action as (stage_index, action_type)
+        # action_type in {0: next_var, 1: prev_var, 2: inc_replicas, 3: dec_replicas, 4: next_batch, 5: prev_batch}
+        # We'll only execute valid actions (e.g. can't decrease replicas below 1).
+        num_stages = len(stages)
+        action_space = [(s, a_type) for s in range(num_stages) for a_type in range(6)]
+
+        def next_var(v_idx, max_v):
+            return (v_idx + 1) % max_v
+
+        def prev_var(v_idx, max_v):
+            return (v_idx - 1) % max_v
+
+        def next_batch(b_idx, max_b):
+            return (b_idx + 1) % max_b
+
+        def prev_batch(b_idx, max_b):
+            return (b_idx - 1) % max_b
+
+        def get_next_state(state, action):
+            s, a_type = action
+            v_idx, r, b_idx = state[s]
+            max_v = len(stage_variant_options[s])
+            max_b = len(stage_batch_options[s])
+
+            if a_type == 0:  # next variant
+                v_idx = next_var(v_idx, max_v)
+            elif a_type == 1:  # prev variant
+                v_idx = prev_var(v_idx, max_v)
+            elif a_type == 2:  # inc replicas
+                if r < scaling_cap:
+                    r += 1
+            elif a_type == 3:  # dec replicas
+                if r > 1:
+                    r -= 1
+            elif a_type == 4:  # next batch
+                b_idx = next_batch(b_idx, max_b)
+            elif a_type == 5:  # prev batch
+                b_idx = prev_batch(b_idx, max_b)
+
+            new_state = list(state)
+            new_state[s] = (v_idx, r, b_idx)
+            return tuple(new_state)
+
+        # Q-learning parameters
+        learning_rate = 0.1
+        discount_factor = 0.95
+        epsilon = 0.1
+        episodes = num_state_limit if num_state_limit else 1000
+        steps_per_episode = min(50, episodes)  # limit steps per episode
+
+        Q = {}
+        def get_Q(s, a):
+            return Q.get((s, a), 0.0)
+
+        best_state = None
+        best_obj = -float('inf')
+
+        for ep in range(episodes):
+            # Random initial state: random configuration
+            random_state = []
+            for s in range(num_stages):
+                v_idx = random.randint(0, len(stage_variant_options[s]) - 1)
+                r = random.randint(1, scaling_cap)
+                b_idx = random.randint(0, len(stage_batch_options[s]) - 1)
+                random_state.append((v_idx, r, b_idx))
+            state = tuple(random_state)
+            apply_state(state)  # apply random init
+
+            for step in range(steps_per_episode):
+                # Epsilon-greedy action selection
+                if random.random() < epsilon:
+                    action = random.choice(action_space)
+                else:
+                    # choose best action according to Q
+                    qs = [(get_Q(state, a), a) for a in action_space]
+                    max_q = max(qs, key=lambda x: x[0])[0]
+                    best_actions = [a for q, a in qs if q == max_q]
+                    action = random.choice(best_actions) if best_actions else random.choice(action_space)
+
+                new_state = get_next_state(state, action)
+                apply_state(new_state)
+                r = compute_reward()
+                if r > best_obj and r != -1e6:
+                    best_obj = r
+                    best_state = new_state
+                    # print(f"state {state_counter + 1} added.")
+                
+                # Update Q
+                max_next = max(get_Q(new_state, a2) for a2 in action_space)
+                old_q = get_Q(state, action)
+                new_q = old_q + learning_rate * (r + discount_factor * max_next - old_q)
+                Q[(state, action)] = new_q
+
+                state = new_state
+
+        if best_state is None:
+            print("No feasible state found using Q-Learning optimization.")
+            return pd.DataFrame([])
+
+        # Apply best state and return result
+        apply_state(best_state)
+        obj_dict = self.objective(alpha=alpha, beta=beta, gamma=gamma)
+        state_row = {}
+
+        if self.complete_profile:
+            for task_id_j, task_obj in enumerate(self.pipeline.inference_graph):
+                state_row[f"task_{task_id_j}_latency"] = task_obj.latency
+                state_row[f"task_{task_id_j}_throughput"] = task_obj.throughput
+                state_row[f"task_{task_id_j}_throughput_all_replicas"] = task_obj.throughput_all_replicas
+                state_row[f"task_{task_id_j}_accuracy"] = task_obj.accuracy
+                state_row[f"task_{task_id_j}_measured"] = task_obj.measured
+                state_row[f"task_{task_id_j}_cpu_all_replicas"] = task_obj.cpu_all_replicas
+                state_row[f"task_{task_id_j}_gpu_all_replicas"] = task_obj.gpu_all_replicas
+
+            state_row["pipeline_accuracy"] = self.pipeline.pipeline_accuracy
+            state_row["pipeline_latency"] = self.pipeline.pipeline_latency
+            state_row["pipeline_throughput"] = self.pipeline.pipeline_throughput
+            state_row["pipeline_cpu"] = self.pipeline.pipeline_cpu
+            state_row["pipeline_gpu"] = self.pipeline.pipeline_gpu
+            state_row["alpha"] = alpha
+            state_row["beta"] = beta
+            state_row["gamma"] = gamma
+            state_row["accuracy_objective"] = self.accuracy_objective()
+            state_row["resource_objective"] = self.resource_objective()
+            state_row["batch_objective"] = self.batch_objective()
+
+        for task_id_j, task_obj in enumerate(self.pipeline.inference_graph):
+            state_row[f"task_{task_id_j}_variant"] = task_obj.active_variant
+            state_row[f"task_{task_id_j}_cpu"] = task_obj.cpu
+            state_row[f"task_{task_id_j}_gpu"] = task_obj.gpu
+            state_row[f"task_{task_id_j}_batch"] = task_obj.batch
+            state_row[f"task_{task_id_j}_replicas"] = task_obj.replicas
+
+        state_row.update(obj_dict)
+        return pd.DataFrame([state_row])
