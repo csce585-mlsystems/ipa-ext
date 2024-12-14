@@ -31,7 +31,7 @@ batching_cap: 64
 arrival_rate: 31
 num_state_limit: 1000000 # number of states
 threshold: 0.5 # RPS threshold for finding the base allocation
-optimization_method: gurobi # options: [brute-force | gurobi | both]
+optimization_method: gurobi # options: [brute-force | gurobi | both | q-learning]
 allocation_mode: base # options: [fix | base | variable]
 sla_factor: 1
 normalize_accuracy: true
