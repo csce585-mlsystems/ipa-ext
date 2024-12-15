@@ -35,14 +35,17 @@ perf --version
 
    - Use the `experiments/runner/run_revision_perf.sh` script to run the experiments.
    - This script internally calls all experiments in `experiments/runner/run-revision.sh` and uses `perf` to measure the energy consumption of each experiment.
+   - Use the `experiments/runner/run_q_learning_perf.sh` script to run the Gurobi vs Q-learning experiments.
 
 2. **Energy Measurement Logs:**
 
    - The energy consumption logs are saved in the `energy_logs` directory.
+   - The energy consumption logs from the gurobi and Q-learning experiments are save in the `energy_comparison` directory. 
 
 3. **Generate Plots:**
 
    - Use the `experiments/runner/run_revision_perf_plot.ipynb` Jupyter Notebook to generate plots for the energy benchmarks of the workloads.
+   - Use the `experiments/runner/graph_q_learning.ipynb` Jupyter Notebook to generate plots for the energy benchmarks of the Gurobi vs Q-learning workloads.
    - The generated plots are saved in the `plots` directory.
 
 4. **Segment Anything:**
