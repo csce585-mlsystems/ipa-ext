@@ -71,6 +71,7 @@ To run Q-learning, follow the same instructions as for the Gurobi optimizer. You
    - Change the value of the `optimizer` parameter from `gurobi` to `q_learning`.
 3. Adjust the function arguments:
    - Modify any function arguments that currently have the value `gurobi` to `q_learning`.
+4. Moreover, we have provided config files for Q-learning in the `ipa-ext/data/configs` directory. You can use these files to run Q-learning experiments. The config files with the number 4, 9, 14, and 19 are the Q-learning config files. These config files are used for running the project in the updated scripts and entry point and they can be used in the same way as the other optimizers.
 
 By making these changes, you can use Q-learning as the optimizer in the pipeline.
 
