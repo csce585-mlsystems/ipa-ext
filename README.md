@@ -40,7 +40,7 @@ perf --version
 2. **Energy Measurement Logs:**
 
    - The energy consumption logs are saved in the `energy_logs` directory.
-   - The energy consumption logs from the gurobi and Q-learning experiments are save in the `energy_comparison` directory. 
+   - The energy consumption logs from the gurobi and Q-learning experiments are save in the `energy_comparison` directory.
 
 3. **Generate Plots:**
 
