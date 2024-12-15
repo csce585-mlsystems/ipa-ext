@@ -78,4 +78,4 @@ By making these changes, you can use Q-learning as the optimizer in the pipeline
 
 Please find the Final report [here](FinalReport.pdf).
 Please find the Final presentation slides [here](FinalPresentation.pdf).
-Please find the Final presentation video [here](https://youtu.be/aiqI5TcQTSs).
+Please find the Final presentation video [here](https://youtu.be/Qzqs_lrlGQg).
